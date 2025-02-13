@@ -221,6 +221,7 @@ widen_vuln_coms <- function(vuln_df, coms_df){
 }
 
 combine_outdata <- function(out_data_lst){
+
   if(!is.null(out_data_lst$index)){
     out_data_lst$start <- out_data_lst$start %>%
       select(-any_of(colnames(out_data_lst$index)))
@@ -274,7 +275,10 @@ combine_outdata <- function(out_data_lst){
 update_restored <- function(df, session){
   # match column names to inputs and/or maybe reactive values?
   # will need some sort of lookup for what type of input needs to be updated
-  df_coms <- df %>% select(matches("^com_")) %>%
+
+  # Catch comments
+  df_coms <- df %>%
+    select(matches("^com_")) %>%
     tidyr::pivot_longer(everything(), names_to = "input",
                         names_prefix = "com_",
                         values_to = "comment",
@@ -282,20 +286,26 @@ update_restored <- function(df, session){
     mutate(comment = ifelse(is.na(comment), "", comment)) %>%
     distinct()
 
-  df2 <- df %>% select(-matches("^com_")) %>%
+  # Catch input values
+  df2 <- df %>%
+    select(-matches("^com_")) %>%
     tidyr::pivot_longer(everything(), names_to = "input",
                              values_to = "value",
                              values_transform = as.character) %>%
     distinct() %>%
-    mutate(input2 = ifelse(stringr::str_detect(.data$input, "rng_chg_pth"), "rng_chg_pth", .data$input)) %>%
+    mutate(input2 = ifelse(stringr::str_detect(.data$input, "rng_chg_pth"),
+                           "rng_chg_pth", .data$input)) %>%
     left_join(df_coms, by = "input") %>%
-    left_join( ui_build_table %>% select(id, .data$update_fun), by = c("input2" = "id")) %>%
+    left_join(select(ui_build_table, "id", "update_fun"),
+              by = c("input2" = "id")) %>%
     select(-"input2") %>%
     filter(!is.na(.data$update_fun)) %>%
-    mutate(comment = ifelse(is.na(.data$comment) & stringr::str_detect(.data$input, "^[B,C,D]\\d.*"),
-                            "", .data$comment),
-           value = ifelse(is.na(.data$value) & stringr::str_detect(.data$input, "pth"),
-                          "", .data$value)) %>%
+    mutate(
+      comment = ifelse(
+        is.na(.data$comment) & stringr::str_detect(.data$input, "^[B,C,D]\\d.*"),
+        "", .data$comment),
+      value = ifelse(is.na(.data$value) & stringr::str_detect(.data$input, "pth"),
+                     "", .data$value)) %>%
     rowwise() %>%
     mutate(arg_name = intersect( c("selected", "value"), formalArgs(.data$update_fun)))
 
@@ -305,6 +315,7 @@ update_restored <- function(df, session){
 
   # run the appropriate update function for each input
   # tricky part is supplying the right argument name for the update fun
+
   purrr::pwalk(df2, update_call, session = session)
 }
 
@@ -332,25 +343,35 @@ spat_vuln_hide <- function(id, check_exists, do_spat, restored, spat_inc){
   nmis <- paste0("not_missing_", id)
   tblid <- paste0("tbl_", id)
 
+  # If has been run at least once
   if(isTruthy(do_spat)){
+    # And we have the data
+    #  - Show all details, hide "missing" message
     if(isTruthy(check_exists)){
       shinyjs::hide(mis)
       shinyjs::show(mapid)
       shinyjs::show(tblid)
       shinyjs::show(nmis)
     } else {
+    # And we don't have the data
+    # - Hide all details and show "missing" message
+      shinyjs::show(mis)
       shinyjs::hide(mapid)
       shinyjs::hide(tblid)
       shinyjs::hide(nmis)
-      shinyjs::show(mis)
     }
+    # Otherwise if was restored
   } else if(isTruthy(restored)){
+    # And we have spatial data results for this variable
+    # - Show not missing and table, hide map (because we haven't recovered the spatial data); hide missing
     if(isTruthy(spat_inc)){
       shinyjs::hide(mis)
       shinyjs::hide(mapid)
       shinyjs::show(nmis)
       shinyjs::show(tblid)
     } else {
+      # And we don't have spatial data results for this variable
+      # - Hide all details and show "missing" message
       shinyjs::show(mis)
       shinyjs::hide(mapid)
       shinyjs::hide(nmis)
@@ -419,4 +440,156 @@ recreate_index_res <- function(df){
 
   return(index_res)
 
+}
+
+switch_tab <- function(tab, parent_session) {
+  updateTabsetPanel(session = parent_session, input = "tabset", selected = tab)
+  shinyjs::runjs("window.scrollTo(0, 0)")
+}
+
+track_mandatory <- function(m, input) {
+  all_filled <- vapply(m,
+                   function(x) !is.null(input[[x]]) && input[[x]] != "",
+                   FUN.VALUE = logical(1)) %>%
+    all()
+  shinyjs::toggleState(id = "continue", condition = all_filled)
+}
+
+show_guidelines <- function(input) {
+  # Show guidelines with additional info for each section
+  help_ins <- stringr::str_subset(names(input), "help")
+
+  purrr::map(help_ins,
+             ~observeEvent(input[[.x]], {
+               guide_popup(.x)
+             }, ignoreInit = TRUE))
+}
+
+collect_questions <- function(input) {
+  q <- stringr::str_subset(names(input), "^[B,C,D]\\d.*") %>%
+    purrr::map_df(~getMultValues(input[[.x]], .x)) %>%
+    as_tibble()
+
+  c <- stringr::str_subset(names(input), "^com[B,C,D]\\d.*") %>%
+    purrr::map_df(~data.frame(Code = stringr::str_remove(.x, "com"),
+                              com = input[[.x]]))
+
+  e <- stringr::str_subset(names(input), "^evi[B,C,D]\\d.*") %>%
+    purrr::map_df(~data.frame(Code = stringr::str_remove(.x, "evi"),
+                              evi = input[[.x]]))
+
+  list("questions" = q, "comments" = c, "evidence" = e)
+}
+
+bind_elements <- function(questions, type) {
+  questions %>%
+    purrr::map(~.x()[[type]]) %>%
+    purrr::list_rbind()
+}
+
+
+#' Check and load spatial vector data
+#'
+#' @noRd
+
+read_poly <- function(pth, name, req = FALSE) {
+
+  # Checks
+  if(!req & !isTruthy(pth)) return(NULL) # If it can be NULL and is null, return NULL
+  req(pth)
+  validate(need(fs::file_exists(pth), "File does not exist"))
+
+  # Read file
+  notify(paste("Loading", name))
+  s <- try(sf::st_read(pth, agr = "constant", quiet = TRUE), silent = TRUE)
+  validate(need(
+    !inherits(s, "try-error"),
+    "Error reading file. Are you sure this is a valid polygon spatial file?"))
+
+  check_polys(s, name)
+
+}
+
+#' Check and load spatial raster data
+#'
+#' @noRd
+read_raster <- function(pth, name, scn_nms = NULL, req = FALSE) {
+
+  # Checks
+
+  # If it can be NULL and is null, return NULL
+  if(!req & all(vapply(pth, is.null, TRUE))) return(NULL)
+
+  if(is.list(pth)) {
+    pth <- unlist(pth)
+    pth <- pth[sort(names(pth))]
+  }
+
+  names(pth) <- fs::path_file(pth) %>% fs::path_ext_remove()
+
+  req(pth)
+
+  if(length(pth) > 1) {
+    req(scn_nms)
+    if(length(pth) != length(scn_nms)) {
+      stop("Unexpected mismatch between rng_chg inputs and scenario names",
+           call. = FALSE)
+    }
+  }
+
+  # Read file
+  notify(paste("Loading", name))
+
+  r <- try({
+    t <- pth %>%
+      terra::rast() %>%
+      check_trim()
+    if(!is.null(scn_nms) && length(scn_nms) == length(pth)) {
+      terra::set.names(t, scn_nms)
+    }
+    t
+  }, silent = TRUE)
+
+  n <- length(scn_nms)
+  validate(need(
+    !inherits(r, "try-error"),
+    paste("Cannot open ",
+          if(n == 1) "this" else "these",
+          if(n == 1) "file" else "files",
+          "as SpatRaster")
+  ))
+
+  check_rast(r, name)
+
+  r
+}
+
+read_clim <- function(pth, scn_nms) {
+  notify("Loading climate data rasters")
+  get_clim_vars(pth, scenario_names = scn_nms)
+}
+
+read_clim_readme <- function(pth) {
+  notify("Loading climate data readme")
+  pth <- fs::path(pth, "climate_data_readme.csv")
+  req(fs::file_exists(pth))
+  utils::read.csv(pth, check.names = FALSE)
+}
+
+notify <- function(msg) {
+
+  id <- showNotification(msg, duration = NULL, closeButton = FALSE)
+  # Use `eval()` to apply to exiting the parent function
+  eval(on.exit(removeNotification(id), add = TRUE), envir = parent.frame())
+  if(isTruthy(getOption("ccviR.debug"))) message(msg)
+}
+
+
+
+
+is_ready <- function(reactive) {
+  tryCatch({
+    reactive
+    TRUE
+  }, error = function(cond) FALSE)
 }
