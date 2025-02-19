@@ -27,6 +27,7 @@
 #' @param hs_rcl a matrix used to classify \code{hs_rast} into 0: not suitable, 1:
 #'   lost, 2: maintained, 3: gained. See \code{\link[terra]{classify}} for
 #'   details on the matrix format.
+#' @param protected_rast Optional. A SpatRaster object with protected areas.
 #' @param gain_mod a number between 0 and 1 that can be used to down-weight gains
 #'   in the modeled range change under climate change
 #' @param scenario_names character vector with names that identify multiple
@@ -73,12 +74,40 @@
 #'   hs_rcl = matrix(c(-1, 0, 1, 1, 2, 3), ncol = 2),
 #'   scenario_names = scn_nms
 #' )
+#'
+#' # With only one range change scenario (suboptimal)
+#'
+#' spat_res <- analyze_spatial(
+#'   range_poly = sf::read_sf(file.path(base_pth, "rng_poly.shp"), agr = "constant"),
+#'   scale_poly = sf::read_sf(file.path(base_pth, "assess_poly.shp"), agr = "constant"),
+#'   clim_vars_lst = clim_vars,
+#'   hs_rast = terra::rast(file.path(base_pth, "rng_chg_45.tif")),
+#'   hs_rcl = matrix(c(-1, 0, 1, 1, 2, 3), ncol = 2),
+#'   scenario_names = scn_nms
+#' )
+#'
+#' \dontrun{
+#' # With protected areas
+#' spat_res <- analyze_spatial(
+#'   range_poly = sf::read_sf(file.path(base_pth, "rng_poly.shp"), agr = "constant"),
+#'   scale_poly = sf::read_sf(file.path(base_pth, "assess_poly.shp"), agr = "constant"),
+#'   protected_rast = terra::rast("misc/protected_areas/pa_north_america.tif"),
+#'   clim_vars_lst = clim_vars,
+#'   hs_rast = terra::rast(c(file.path(base_pth, "rng_chg_45.tif"),
+#'                           file.path(base_pth, "rng_chg_85.tif"))),
+#'   hs_rcl = matrix(c(-1, 0, 1, 1, 2, 3), ncol = 2),
+#'   scenario_names = scn_nms
+#' )
+#' }
 
-analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
-                        non_breed_poly = NULL, ptn_poly = NULL,
-                        hs_rast = NULL, hs_rcl = NULL, gain_mod = 1,
-                        scenario_names = "Scenario 1"){
-  message("performing spatial analysis")
+analyze_spatial <- function(
+    range_poly, scale_poly, clim_vars_lst,
+    non_breed_poly = NULL, ptn_poly = NULL,
+    hs_rast = NULL, hs_rcl = NULL, protected_rast = NULL,
+    gain_mod = 1, scenario_names = "Scenario 1", quiet = FALSE) {
+
+  n <- 6
+  inform_prog("Checking files", quiet, n, 1)
 
   clim_nms_dif <- setdiff(names(clim_vars_lst),
                           c("mat", "cmd", "map", "ccei", "htn", "clim_poly"))
@@ -114,13 +143,13 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
 
   # Check polygon inputs have only one feature and if not union and crs
   crs_use <- sf::st_crs(clim_vars_lst$mat[[1]])
-  range_poly <- check_polys(range_poly, crs_use, "range polygon")
-  scale_poly <- check_polys(scale_poly, crs_use, "assessment area polygon")
-  ptn_poly <- check_polys(ptn_poly, crs_use, "PTN polygon")
-  clim_poly <- check_polys(clim_vars_lst$clim_poly, crs_use, "climate data extext polygon")
+  range_poly <- prep_polys(range_poly, crs_use, "range polygon")
+  scale_poly <- prep_polys(scale_poly, crs_use, "assessment area polygon")
+  ptn_poly <- prep_polys(ptn_poly, crs_use, "PTN polygon")
+  clim_poly <- prep_polys(clim_vars_lst$clim_poly, crs_use, "climate data extext polygon")
 
   if(!is.null(non_breed_poly) & !is.null(clim_vars_lst$ccei[[1]])){
-    non_breed_poly <- check_polys(non_breed_poly, sf::st_crs(clim_vars_lst$ccei[[1]]),
+    non_breed_poly <- prep_polys(non_breed_poly, sf::st_crs(clim_vars_lst$ccei[[1]]),
                                   "non-breeding range polygon")
   } else if (!is.null(non_breed_poly)){
     non_breed_poly <- NULL
@@ -131,6 +160,7 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
   }
 
   # Clip range to climate data polygon and to scale poly
+  inform_prog("Clipping ranges", quiet, n, 2)
 
   range_poly_clim <- st_intersection(range_poly, clim_poly) %>%
     st_set_agr("constant")
@@ -153,6 +183,7 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
   range_poly <- valid_or_error(range_poly, "range_poly assessment area intersection")
 
   # Section A - Exposure to Local Climate Change: #====
+  inform_prog("Assessing local climate exposure", quiet, n, 3)
 
   # Temperature
   mat_classes <- calc_prop_raster(clim_vars_lst$mat, range_poly, "MAT")
@@ -185,6 +216,7 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
   }
 
   # Section C - Sensitivity and Adaptive Capacity: #====
+  inform_prog("Assessing thermal & hydrological niches", quiet, n, 4)
 
   # Historical Thermal niche
   if(is.null(clim_vars_lst$htn)){
@@ -223,7 +255,9 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
 
 
   # Section D - Modelled Response to Climate Change #====
-  if(is.null(hs_rast)){
+  inform_prog("Assessing modelled response to climate change", quiet, n, 5)
+
+  if(is.null(hs_rast)) {
     mod_resp_CC <- rep(NA_real_, 2) %>% as.list() %>% as.data.frame() %>%
       purrr::set_names(c("range_change", "range_overlap"))
 
@@ -241,8 +275,25 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
     }
 
     mod_resp_CC <- calc_gain_loss(hs_rast, scale_poly, gain_mod = gain_mod)
-
   }
+
+  if(is.null(protected_rast) | is.null(hs_rast)) {
+    protected <- data.frame(protected = NA_real_)
+    protected_rast_assess <- NULL
+  } else {
+
+    # Only keep actual range i.e. set 0 (not suitable) and 1 (lost) to NA
+    range_future <- terra::subst(hs_rast, c(0, 1), NA)
+
+    # Crop to assessment area
+    protected_rast_assess <- terra::crop(
+      protected_rast,
+      st_transform(scale_poly, terra::crs(protected_rast)))
+
+    protected <- calc_overlap_raster(protected_rast_assess, range_future)
+  }
+
+  inform_prog("Finalizing outputs", quiet, n, 6)
 
   # Range size
   range_size <- tibble(range_size = st_area(range_poly) %>% units::set_units(NULL))
@@ -262,48 +313,53 @@ analyze_spatial <- function(range_poly, scale_poly, clim_vars_lst,
 
   out <- list(spat_table = bind_cols(scn_nm, mat_classes, cmd_classes, ccei_classes,
                                      htn_classes, ptn_perc,
-                                     range_MAP, mod_resp_CC, range_size),
+                                     range_MAP, mod_resp_CC, range_size,
+                                     protected),
               range_poly_assess = range_poly,
-              range_poly_clim = range_poly_clim)
+              range_poly_clim = range_poly_clim,
+              protected_rast_assess = protected_rast_assess)
   return(out)
 }
 
+prep_polys <- function(poly, rast_crs, var_name) {
+  if(is.null(poly)) return(poly)
 
-# helper function to check input polys
-check_polys <- function(poly, rast_crs, var_name){
-  if(is.null(poly)){
-    return(poly)
-  }
-  if(!inherits(poly, "sf")){
-    poly <- sf::st_as_sf(poly)
-  }
-
-  geo_type <- st_geometry_type(poly)
-  if(any(!geo_type %in% c("POLYGON", "MULTIPOLYGON"))){
-
-    if(any(geo_type %in% c("POLYGON", "MULTIPOLYGON"))){
-      poly <- st_collection_extract(poly, "POLYGON")
-      message("Point or line geometries in the ", var_name,
-              " were dropped.")
-    } else {
-      stop(var_name, " has geometry type ", unique(geo_type),
-           " but only polygons are accepted for this input.",
-           call. = FALSE)
-    }
-  }
-
-  if(is.na(st_crs(poly))){
-    stop(var_name, " does not have a CRS.",
-         " \nPlease load a file with a valid Coordinate Reference System",
-         call. = FALSE)
-  }
-
+  poly <- check_polys(poly, var_name)
   poly <- sf::st_transform(poly, rast_crs)
-
   poly <- valid_or_error(poly, var_name)
 
   return(poly)
 }
+
+# helper function to check input polys
+check_polys <- function(poly, var_name) {
+
+  if(is.null(poly)) return(poly)
+  if(!inherits(poly, "sf")) poly <- sf::st_as_sf(poly)
+
+  validate(need(
+    !is.na(st_crs(poly)),
+    paste(var_name, " does not have a CRS.",
+          " \nPlease load a file with a valid Coordinate Reference System")
+  ))
+
+  geo_type <- st_geometry_type(poly)
+  if(any(!geo_type %in% c("POLYGON", "MULTIPOLYGON"))) {
+
+    validate(need(
+      any(geo_type %in% c("POLYGON", "MULTIPOLYGON")),
+      paste0(var_name, " has geometry type ", unique(geo_type),
+             " but only polygons are accepted for this input.")
+    ))
+
+    poly <- st_collection_extract(poly, "POLYGON")
+    message("Point or line geometries in the ", var_name,
+            " were dropped.")
+  }
+
+  return(poly)
+}
+
 
 check_rast <- function(ras, var_name){
   if(!is(ras, "SpatRaster")){
